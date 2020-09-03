@@ -29,6 +29,7 @@ namespace TwitchLib.Webhook.Filters
         {
             var routeData = context.RouteData;
             var request = context.HttpContext.Request;
+            request.EnableBuffering();
 
             if (routeData.TryGetWebHookReceiverName(out var receiverName) && HttpMethods.IsGet(context.HttpContext.Request.Method))
             {

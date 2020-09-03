@@ -12,6 +12,11 @@ using Microsoft.Extensions.Logging;
 
 namespace TwitchLib.Webhook.Filters
 {
+    using System.IO;
+    using System.Security.Cryptography;
+    using System.Threading;
+    using Microsoft.AspNetCore.WebUtilities;
+
     public class TwitchVerifySignatureFilter : WebHookVerifySignatureFilter, IAsyncResourceFilter
     {
 
@@ -39,6 +44,7 @@ namespace TwitchLib.Webhook.Filters
 
             var routeData = context.RouteData;
             var request = context.HttpContext.Request;
+            request.EnableBuffering();
             if (routeData.TryGetWebHookReceiverName(out var receiverName) &&
                 IsApplicable(receiverName) &&
                 HttpMethods.IsPost(request.Method))
@@ -89,7 +95,7 @@ namespace TwitchLib.Webhook.Filters
                     var secret = Encoding.UTF8.GetBytes(secretKey);
 
                     // 4. Get the actual hash of the request body.
-                    var actualHash = await ComputeRequestBodySha256HashAsync(request, secret);
+                    var actualHash = await ComputeRequestBodySha256HashAsyncNew(request, secret, (byte[])null, (byte[])null);
 
                     // 5. Verify that the actual hash matches the expected hash.
                     if (!SecretEqual(expectedHash, actualHash))
@@ -113,10 +119,70 @@ namespace TwitchLib.Webhook.Filters
             }
 
             await next();
+        }
 
+        private static async Task PrepareRequestBody(HttpRequest request)
+        {
+            if (request == null)
+                throw new ArgumentNullException(nameof(request));
+            if (!request.Body.CanSeek)
+            {
+                request.EnableBuffering(30720);
+                await request.Body.DrainAsync(CancellationToken.None);
+            }
+            request.Body.Seek(0L, SeekOrigin.Begin);
+        }
 
+        private async Task<byte[]> ComputeRequestBodySha256HashAsyncNew(
+            HttpRequest request,
+            byte[] secret,
+            byte[] prefix,
+            byte[] suffix)
+        {
+            if (request == null)
+            {
+                throw new ArgumentNullException(nameof(request));
+            }
 
+            if (secret == null)
+            {
+                throw new ArgumentNullException(nameof(secret));
+            }
 
+            if (secret.Length == 0)
+            {
+                throw new ArgumentException();
+            }
+
+            await PrepareRequestBody(request);
+            byte[] hash;
+            using (var hasher = new HMACSHA256(secret))
+            {
+                try
+                {
+                    if (prefix != null && prefix.Length != 0)
+                        hasher.TransformBlock(prefix, 0, prefix.Length, (byte[])null, 0);
+                    var buffer = new byte[4096];
+                    var inputStream = request.Body;
+                    while (true)
+                    {
+                        int bytesRead;
+                        if ((bytesRead = await inputStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                            hasher.TransformBlock(buffer, 0, bytesRead, (byte[])null, 0);
+                        else
+                            break;
+                    }
+                    if (suffix != null && suffix.Length != 0)
+                        hasher.TransformBlock(suffix, 0, suffix.Length, (byte[])null, 0);
+                    hasher.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                    hash = hasher.Hash;
+                }
+                finally
+                {
+                    request.Body.Seek(0L, SeekOrigin.Begin);
+                }
+            }
+            return hash;
         }
     }
 }
